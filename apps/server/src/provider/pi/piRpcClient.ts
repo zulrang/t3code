@@ -31,6 +31,8 @@ export interface PiRpcClientOptions {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly environment?: ProviderInstanceEnvironment;
+  /** Pre-merged process env for probes and other callers that already resolved instance env. */
+  readonly spawnEnv?: NodeJS.ProcessEnv;
   /** When true (default), spawn with `--no-session` for ephemeral runtime/probe clients. */
   readonly noSession?: boolean;
   readonly requestTimeoutMs?: number;
@@ -122,7 +124,7 @@ export const makePiRpcClient = Effect.fn("makePiRpcClient")(function* (
   const useNoSession = options.noSession !== false;
   const args = ["--mode", "rpc", ...(useNoSession ? ["--no-session"] : [])];
   const commandLabel = `${options.binaryPath} ${args.join(" ")}`;
-  const env = mergeProviderInstanceEnvironment(options.environment);
+  const env = options.spawnEnv ?? mergeProviderInstanceEnvironment(options.environment);
 
   const child = yield* spawner
     .spawn(
