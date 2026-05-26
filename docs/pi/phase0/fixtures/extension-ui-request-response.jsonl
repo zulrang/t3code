@@ -1,0 +1,14 @@
+{"type":"fixture_note","source":"upstream rpc.md/rpc-types.ts","reason":"local pi 0.72.1 get_commands returned prompt/skill commands only; no extension command was available to trigger a live extension_ui_request"}
+{"type":"extension_ui_request","id":"uuid-select","method":"select","title":"Allow dangerous command?","options":["Allow","Deny"],"timeout":30000}
+{"type":"extension_ui_response","id":"uuid-select","value":"Allow"}
+{"type":"extension_ui_request","id":"uuid-confirm","method":"confirm","title":"Clear session?","message":"This will clear the current session.","timeout":30000}
+{"type":"extension_ui_response","id":"uuid-confirm","confirmed":true}
+{"type":"extension_ui_request","id":"uuid-input","method":"input","title":"Enter a value","placeholder":"value","timeout":30000}
+{"type":"extension_ui_response","id":"uuid-input","value":"example value"}
+{"type":"extension_ui_request","id":"uuid-editor","method":"editor","title":"Edit some text","prefill":"prefilled text"}
+{"type":"extension_ui_response","id":"uuid-editor","cancelled":true}
+{"type":"extension_ui_request","id":"uuid-notify","method":"notify","message":"Command blocked by user","notifyType":"warning"}
+{"type":"extension_ui_request","id":"uuid-status","method":"setStatus","statusKey":"my-ext","statusText":"Working"}
+{"type":"extension_ui_request","id":"uuid-widget","method":"setWidget","widgetKey":"my-ext","widgetLines":["line one","line two"],"widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"uuid-title","method":"setTitle","title":"pi - project"}
+{"type":"extension_ui_request","id":"uuid-editor-text","method":"set_editor_text","text":"prefilled text for the user"}

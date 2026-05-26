@@ -1,0 +1,21 @@
+{
+  "scenario": "process exit shortly after prompt command was written",
+  "commandWritten": {
+    "id": "prompt_killed",
+    "type": "prompt",
+    "message": "Write numbers forever until interrupted. Do not run tools."
+  },
+  "exit": {
+    "code": null,
+    "signal": "SIGTERM",
+    "elapsedMs": 253
+  },
+  "stderr": "",
+  "stdoutLines": [],
+  "expectedClientBehavior": [
+    "reject pending command prompt_killed",
+    "emit session.exited",
+    "if a T3 turn was active, emit terminal turn failure",
+    "clear active turn, pending request maps, and watchdog timers"
+  ]
+}

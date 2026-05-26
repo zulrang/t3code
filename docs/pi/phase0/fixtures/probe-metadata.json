@@ -1,0 +1,25 @@
+{
+  "capturedAt": "2026-05-24",
+  "piVersion": "0.72.1",
+  "platform": "linux-wsl2",
+  "commandsExercised": [
+    "get_state",
+    "get_available_models",
+    "get_commands",
+    "set_model",
+    "set_thinking_level",
+    "prompt",
+    "abort"
+  ],
+  "sessionPolicyObservation": {
+    "noSession": "get_state omitted sessionFile",
+    "sessionful": "get_state included sessionFile"
+  },
+  "redactions": [
+    "home paths replaced with <HOME_PATH>",
+    "API keys replaced with <API_KEY>",
+    "response ids removed or replaced",
+    "encrypted thinking signatures omitted"
+  ],
+  "extensionUiFixtureSource": "upstream rpc.md/rpc-types.ts; local get_commands had no extension commands installed"
+}

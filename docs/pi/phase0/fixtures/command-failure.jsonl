@@ -1,0 +1,1 @@
+{"id":"set_model_bad","type":"response","command":"set_model","success":false,"error":"Model not found: __t3_invalid_provider__/__missing__"}

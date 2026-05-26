@@ -100,6 +100,28 @@ describe("ServerSettings.providers.pi", () => {
       customModels: [],
     });
   });
+
+  it("decodes Pi provider patches through ServerSettingsPatch", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          pi: { enabled: true },
+        },
+      }).providers?.pi,
+    ).toEqual({
+      enabled: true,
+    });
+
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          pi: { binaryPath: " /opt/pi " },
+        },
+      }).providers?.pi,
+    ).toEqual({
+      binaryPath: "/opt/pi",
+    });
+  });
 });
 
 describe("ServerSettingsPatch.providerInstances", () => {
