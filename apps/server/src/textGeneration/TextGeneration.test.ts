@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { describe, expect } from "vitest";
 
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
@@ -25,13 +25,14 @@ const makeStubTextGeneration = (overrides: Partial<TextGenerationShape>): TextGe
 
 const makeStubInstance = (
   instanceId: ProviderInstanceId,
+  driverKind: ProviderInstance["driverKind"],
   textGeneration: TextGenerationShape,
 ): ProviderInstance =>
   ({
     instanceId,
-    driverKind: instanceId as unknown as ProviderInstance["driverKind"],
+    driverKind,
     continuationIdentity: {
-      driverKind: instanceId as unknown as ProviderInstance["driverKind"],
+      driverKind,
       continuationKey: `${instanceId}:test`,
     },
     displayName: undefined,
@@ -65,6 +66,7 @@ describe("makeTextGenerationFromRegistry", () => {
       const personalCalls: string[] = [];
       const personal = makeStubInstance(
         personalId,
+        ProviderDriverKind.make("codex"),
         makeStubTextGeneration({
           generateBranchName: (input) => {
             personalCalls.push(input.message);
@@ -76,6 +78,7 @@ describe("makeTextGenerationFromRegistry", () => {
       const workId = ProviderInstanceId.make("codex_work");
       const work = makeStubInstance(
         workId,
+        ProviderDriverKind.make("codex"),
         makeStubTextGeneration({
           generateBranchName: () => Effect.succeed({ branch: "work-branch" }),
         }),
@@ -114,6 +117,45 @@ describe("makeTextGenerationFromRegistry", () => {
         expect(result.failure._tag).toBe("TextGenerationError");
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
+      }
+    }),
+  );
+
+  it.effect("resolves Pi instances without falling back to another provider", () =>
+    Effect.gen(function* () {
+      const piId = ProviderInstanceId.make("pi");
+      const piCalls: string[] = [];
+      const pi = makeStubInstance(
+        piId,
+        ProviderDriverKind.make("pi"),
+        makeStubTextGeneration({
+          generateThreadTitle: (input) => {
+            piCalls.push(input.message);
+            return Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadTitle",
+                detail: "Pi text generation stub",
+              }),
+            );
+          },
+        }),
+      );
+
+      const tg = makeTextGenerationFromRegistry(makeStubRegistry([pi]));
+
+      const result = yield* tg
+        .generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Wire Pi into text generation routing",
+          modelSelection: createModelSelection(piId, "openai/gpt-4"),
+        })
+        .pipe(Effect.result);
+
+      expect(Result.isFailure(result)).toBe(true);
+      expect(piCalls).toEqual(["Wire Pi into text generation routing"]);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe("TextGenerationError");
+        expect(result.failure.detail).toBe("Pi text generation stub");
       }
     }),
   );

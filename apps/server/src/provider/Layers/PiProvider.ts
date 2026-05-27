@@ -86,9 +86,7 @@ export function piSnapshotRefreshInterval(instanceId: string): Duration.Duration
 
 let cachedProbeRpcSemaphore: Semaphore.Semaphore | undefined;
 
-const withProbeRpcPermit = <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
+const withProbeRpcPermit = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
   Effect.gen(function* () {
     if (cachedProbeRpcSemaphore === undefined) {
       cachedProbeRpcSemaphore = yield* Semaphore.make(PI_PROBE_RPC_CONCURRENCY);
