@@ -22,11 +22,13 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { ServerConfig } from "../../config.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAdapterValidationError, ProviderDriverError } from "../Errors.ts";
+import { makePiAdapter } from "../Layers/PiAdapter.ts";
 import {
   checkPiProviderStatus,
   makePendingPiProvider,
   piSnapshotRefreshInterval,
 } from "../Layers/PiProvider.ts";
+import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   type ProviderContinuationIdentity,
@@ -48,7 +50,10 @@ const LIVE_TURNS_ISSUE = "Pi live turns are not available until Phase 5 (PiAdapt
 const TEXT_GENERATION_ISSUE =
   "Pi text generation is not available until Phase 7 (PiTextGeneration).";
 
-export type PiDriverEnv = ChildProcessSpawner.ChildProcessSpawner | ServerConfig;
+export type PiDriverEnv =
+  | ChildProcessSpawner.ChildProcessSpawner
+  | ProviderEventLoggers
+  | ServerConfig;
 
 export function piContinuationIdentity(input: {
   readonly driverKind: ProviderDriverKind;
@@ -136,6 +141,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const scope = yield* Scope.Scope;
       const serverConfig = yield* ServerConfig;
+      const eventLoggers = yield* ProviderEventLoggers;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const effectiveConfig = { ...config, enabled } satisfies PiSettings;
       const continuationIdentity = piContinuationIdentity({
@@ -185,6 +191,15 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         ),
       );
 
+      const adapter = yield* makePiAdapter(effectiveConfig, {
+        instanceId,
+        environment: processEnv,
+        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+      }).pipe(
+        Effect.provideService(Scope.Scope, scope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -193,7 +208,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter: makeStubPiAdapter(),
+        adapter,
         textGeneration: makeStubPiTextGeneration(),
       } satisfies ProviderInstance;
     }),

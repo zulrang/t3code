@@ -24,6 +24,7 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import type { ProviderInstanceRegistryShape } from "../Services/ProviderInstanceRegistry.ts";
 import { BUILT_IN_DRIVERS } from "../builtInDrivers.ts";
 import { deriveProviderInstanceConfigMap } from "../Layers/ProviderInstanceRegistryHydration.ts";
+import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { piSnapshotRefreshInterval } from "../Layers/PiProvider.ts";
 import { makeProviderInstanceRegistry } from "../Layers/ProviderInstanceRegistryLive.ts";
 import {
@@ -46,7 +47,10 @@ const makePiConfig = (overrides?: Partial<PiSettings>): PiSettings =>
 
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "pi-driver-test",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(
+  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+);
 
 const makeStubRegistry = (
   instances: ReadonlyArray<ProviderInstance>,
