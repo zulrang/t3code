@@ -59,7 +59,9 @@ import {
   findSidebarProposedPlan,
   findLatestProposedPlan,
   deriveWorkLogEntries,
+  findPiFreshRuntimeWarning,
   hasActionableProposedPlan,
+  threadUsesPiDriver,
   hasToolActivityForTurn,
   isLatestTurnSettled,
   formatElapsed,
@@ -1272,6 +1274,34 @@ export default function ChatView(props: ChatViewProps) {
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
     [activeLatestTurn?.turnId, threadActivities],
   );
+  const piFreshRuntimeWarning = useMemo(
+    () => findPiFreshRuntimeWarning(threadActivities),
+    [threadActivities],
+  );
+  const [dismissedPiFreshRuntimeThreadId, setDismissedPiFreshRuntimeThreadId] =
+    useState<ThreadId | null>(null);
+  const showPiFreshRuntimeBanner =
+    piFreshRuntimeWarning !== null &&
+    activeThreadId !== null &&
+    threadUsesPiDriver(providerStatuses, activeThread?.modelSelection.instanceId) &&
+    dismissedPiFreshRuntimeThreadId !== activeThreadId;
+  const mergedComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    if (!showPiFreshRuntimeBanner || !activeThreadId || !piFreshRuntimeWarning) {
+      return composerBannerItems;
+    }
+    return [
+      {
+        id: `pi-fresh-runtime:${activeThreadId}`,
+        variant: "warning",
+        icon: <TriangleAlertIcon />,
+        title: "Pi runtime restarted",
+        description: piFreshRuntimeWarning,
+        dismissLabel: "Dismiss Pi runtime warning",
+        onDismiss: () => setDismissedPiFreshRuntimeThreadId(activeThreadId),
+      },
+      ...composerBannerItems,
+    ];
+  }, [activeThreadId, composerBannerItems, piFreshRuntimeWarning, showPiFreshRuntimeBanner]);
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -3604,7 +3634,7 @@ export default function ChatView(props: ChatViewProps) {
             )}
           >
             <div className="relative isolate">
-              <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
+              <ComposerBannerStack className="relative z-0" items={mergedComposerBannerItems} />
               <div className="relative z-10">
                 <ChatComposer
                   composerRef={composerRef}

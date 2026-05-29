@@ -90,6 +90,10 @@
     "./keybindings": {
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
+    },
+    "./pi": {
+      "types": "./src/pi.ts",
+      "import": "./src/pi.ts"
     }
   },
   "scripts": {

@@ -149,7 +149,7 @@ describe("PiDriver", () => {
       if (Result.isFailure(result)) {
         expect(result.failure).toBeInstanceOf(TextGenerationError);
         expect(result.failure.operation).toBe("generateThreadTitle");
-        expect(result.failure.detail).toMatch(/Phase 7/i);
+        expect(result.failure.detail).toMatch(/stub/i);
       }
     }));
 
@@ -161,7 +161,7 @@ describe("PiDriver", () => {
         displayName: "Pi",
         environment: [],
         enabled: false,
-        config: makePiConfig(),
+        config: makePiConfig({ binaryPath: "__missing_pi_binary__" }),
       }).pipe(Effect.provide(testLayer), Effect.scoped);
 
       const tg = makeTextGenerationFromRegistry(makeStubRegistry([piInstance]));
@@ -169,14 +169,14 @@ describe("PiDriver", () => {
         .generateBranchName({
           cwd: process.cwd(),
           message: "Add Pi routing test",
-          modelSelection: createModelSelection(piId, "openai/gpt-4"),
+          modelSelection: createModelSelection(piId, "openai%2Fgpt-4"),
         })
         .pipe(Effect.result);
 
       expect(Result.isFailure(result)).toBe(true);
       if (Result.isFailure(result)) {
         expect(result.failure._tag).toBe("TextGenerationError");
-        expect(result.failure.detail).toMatch(/Phase 7/i);
+        expect(result.failure.detail).not.toMatch(/Phase 7/i);
       }
     }),
   );

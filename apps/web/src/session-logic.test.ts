@@ -7,6 +7,9 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { PI_FRESH_RUNTIME_WARNING } from "@t3tools/shared/pi";
+
 import {
   deriveCompletionDividerBeforeEntryId,
   deriveActiveWorkStartedAt,
@@ -16,10 +19,12 @@ import {
   deriveTimelineEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
+  findPiFreshRuntimeWarning,
   findSidebarProposedPlan,
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
+  threadUsesPiDriver,
 } from "./session-logic";
 
 function makeActivity(overrides: {
@@ -1514,5 +1519,48 @@ describe("deriveActiveWorkStartedAt", () => {
         "2026-02-27T21:11:00.000Z",
       ),
     ).toBe("2026-02-27T21:11:00.000Z");
+  });
+});
+
+describe("findPiFreshRuntimeWarning", () => {
+  it("returns the Pi fresh-runtime message from runtime.warning activities", () => {
+    const activities = [
+      makeActivity({
+        kind: "runtime.warning",
+        summary: "Runtime warning",
+        tone: "info",
+        payload: { message: "unrelated warning" },
+      }),
+      makeActivity({
+        id: "pi-fresh-runtime",
+        kind: "runtime.warning",
+        summary: "Runtime warning",
+        tone: "info",
+        payload: { message: PI_FRESH_RUNTIME_WARNING },
+      }),
+    ];
+
+    expect(findPiFreshRuntimeWarning(activities)).toBe(PI_FRESH_RUNTIME_WARNING);
+  });
+
+  it("returns null when no matching runtime.warning exists", () => {
+    expect(findPiFreshRuntimeWarning([])).toBeNull();
+  });
+});
+
+describe("threadUsesPiDriver", () => {
+  const providers = [
+    {
+      instanceId: ProviderInstanceId.make("pi"),
+      driver: ProviderDriverKind.make("pi"),
+      enabled: true,
+      status: "ready",
+      models: [],
+    },
+  ];
+
+  it("detects Pi provider instances", () => {
+    expect(threadUsesPiDriver(providers, ProviderInstanceId.make("pi"))).toBe(true);
+    expect(threadUsesPiDriver(providers, ProviderInstanceId.make("codex"))).toBe(false);
   });
 });

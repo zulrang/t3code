@@ -7,11 +7,15 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  type ProviderInstanceId,
+  type ServerProvider,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
+
+import { PI_FRESH_RUNTIME_WARNING } from "@t3tools/shared/pi";
 
 import type {
   ChatMessage,
@@ -45,7 +49,50 @@ export const PROVIDER_OPTIONS: Array<{
     available: true,
     pickerSidebarBadge: "new",
   },
+  {
+    value: ProviderDriverKind.make("pi"),
+    label: "Pi",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
 ];
+
+function readRuntimeWarningMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const message =
+    "message" in payload && typeof payload.message === "string" ? payload.message : "";
+  return message.trim().length > 0 ? message.trim() : null;
+}
+
+/** Latest Pi fresh-runtime warning in thread activities, if any. */
+export function findPiFreshRuntimeWarning(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): string | null {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index];
+    if (!activity || activity.kind !== "runtime.warning") {
+      continue;
+    }
+    const message = readRuntimeWarningMessage(activity.payload);
+    if (message === PI_FRESH_RUNTIME_WARNING) {
+      return message;
+    }
+  }
+  return null;
+}
+
+export function threadUsesPiDriver(
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>,
+  instanceId: ProviderInstanceId | null | undefined,
+): boolean {
+  if (!instanceId) {
+    return false;
+  }
+  const entry = providers.find((candidate) => candidate.instanceId === instanceId);
+  return entry?.driver === ProviderDriverKind.make("pi");
+}
 
 export interface WorkLogEntry {
   id: string;

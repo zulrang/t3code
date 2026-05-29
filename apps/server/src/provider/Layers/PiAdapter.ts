@@ -27,6 +27,7 @@ import {
   type ToolLifecycleItemType,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { PI_FRESH_RUNTIME_WARNING } from "@t3tools/shared/pi";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -77,9 +78,6 @@ const PROVIDER = ProviderDriverKind.make("pi");
 const TURN_SILENCE_RECONCILE_MS = 30_000;
 const TURN_SILENCE_HARD_MS = 120_000;
 const EXTENSION_UI_DEFAULT_TIMEOUT_MS = 60_000;
-
-const FRESH_RUNTIME_WARNING =
-  "Pi runtime restarted; prior Pi agent context was not resumed. T3 conversation history is still visible, but Pi is starting from a fresh runtime context.";
 
 const BLOCKING_EXTENSION_UI_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const FIRE_AND_FORGET_EXTENSION_UI_METHODS = new Set([
@@ -1386,7 +1384,7 @@ export function makePiAdapter(
           yield* emit({
             ...(yield* buildEventBase({ threadId: input.threadId })),
             type: "session.started",
-            payload: staleResumeCursor ? { message: FRESH_RUNTIME_WARNING } : {},
+            payload: staleResumeCursor ? { message: PI_FRESH_RUNTIME_WARNING } : {},
           });
           yield* emit({
             ...(yield* buildEventBase({ threadId: input.threadId })),
@@ -1397,7 +1395,7 @@ export function makePiAdapter(
             yield* emit({
               ...(yield* buildEventBase({ threadId: input.threadId })),
               type: "runtime.warning",
-              payload: { message: FRESH_RUNTIME_WARNING },
+              payload: { message: PI_FRESH_RUNTIME_WARNING },
             });
           }
 

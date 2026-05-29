@@ -2,8 +2,7 @@
  * PiDriver — `ProviderDriver` for the Pi CLI (`pi --mode rpc`) runtime.
  *
  * Phase 4 registers the driver, wires per-instance snapshot probes, and
- * stubs adapter/text-generation surfaces until Phase 5/7 land live turns
- * and RPC-backed text generation.
+ * wires live PiAdapter turns and RPC-backed text generation.
  *
  * @module provider/Drivers/PiDriver
  */
@@ -20,6 +19,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
+import { makePiTextGeneration } from "../../textGeneration/PiTextGeneration.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAdapterValidationError, ProviderDriverError } from "../Errors.ts";
 import { makePiAdapter } from "../Layers/PiAdapter.ts";
@@ -47,8 +47,7 @@ const decodePiSettings = Schema.decodeSync(PiSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("pi");
 const LIVE_TURNS_ISSUE = "Pi live turns are not available until Phase 5 (PiAdapter).";
-const TEXT_GENERATION_ISSUE =
-  "Pi text generation is not available until Phase 7 (PiTextGeneration).";
+const TEXT_GENERATION_STUB_ISSUE = "Pi text generation stub invoked.";
 
 export type PiDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -117,7 +116,7 @@ const textGenerationUnavailable = (
   Effect.fail(
     new TextGenerationError({
       operation,
-      detail: TEXT_GENERATION_ISSUE,
+      detail: TEXT_GENERATION_STUB_ISSUE,
     }),
   );
 
@@ -209,7 +208,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         enabled,
         snapshot,
         adapter,
-        textGeneration: makeStubPiTextGeneration(),
+        textGeneration: yield* makePiTextGeneration(effectiveConfig, processEnv),
       } satisfies ProviderInstance;
     }),
 };
