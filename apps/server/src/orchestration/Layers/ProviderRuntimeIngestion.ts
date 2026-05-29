@@ -979,6 +979,57 @@ const make = Effect.gen(function* () {
       }
     });
 
+  const finalizeActiveAssistantSegmentBoundary = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    turnId: TurnId;
+    createdAt: string;
+    commandTag: string;
+    finalDeltaCommandTag: string;
+    flushCommandTag: string;
+  }) =>
+    Effect.gen(function* () {
+      const activeMessageId = yield* getActiveAssistantMessageIdForTurn(
+        input.threadId,
+        input.turnId,
+      );
+      if (Option.isNone(activeMessageId)) {
+        return;
+      }
+
+      const detailedThread = yield* projectionSnapshotQuery
+        .getThreadDetailById(input.threadId)
+        .pipe(Effect.map(Option.getOrUndefined));
+      const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
+        serverSettingsService.getSettings,
+        (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
+      );
+      const flushedMessageIds =
+        assistantDeliveryMode === "buffered"
+          ? yield* flushBufferedAssistantMessagesForTurn({
+              event: input.event,
+              threadId: input.threadId,
+              turnId: input.turnId,
+              createdAt: input.createdAt,
+              commandTag: input.flushCommandTag,
+            })
+          : new Set<MessageId>();
+      yield* finalizeActiveAssistantSegmentForTurn({
+        event: input.event,
+        threadId: input.threadId,
+        turnId: input.turnId,
+        createdAt: input.createdAt,
+        commandTag: input.commandTag,
+        finalDeltaCommandTag: input.finalDeltaCommandTag,
+        hasProjectedMessage:
+          detailedThread != null &&
+          hasAssistantMessageForTurn(detailedThread.messages, input.turnId, {
+            streamingOnly: true,
+          }),
+        flushedMessageIds,
+      });
+    });
+
   const upsertProposedPlan = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -1322,8 +1373,45 @@ const make = Effect.gen(function* () {
       const proposedPlanDelta =
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
 
+      const toolSegmentBoundaryTurnId =
+        event.type === "item.started" &&
+        isToolLifecycleItemType(event.payload.itemType) &&
+        eventTurnId !== undefined
+          ? eventTurnId
+          : undefined;
+      if (toolSegmentBoundaryTurnId) {
+        yield* finalizeActiveAssistantSegmentBoundary({
+          event,
+          threadId: thread.id,
+          turnId: toolSegmentBoundaryTurnId,
+          createdAt: now,
+          commandTag: "assistant-complete-on-tool-started",
+          finalDeltaCommandTag: "assistant-delta-finalize-on-tool-started",
+          flushCommandTag: "assistant-delta-flush-on-tool-started",
+        });
+      }
+
       if (assistantDelta && assistantDelta.length > 0) {
         const turnId = toTurnId(event.turnId);
+        if (turnId) {
+          const incomingBaseKey = assistantSegmentBaseKeyFromEvent(event);
+          const segmentState = yield* getAssistantSegmentStateForTurn(thread.id, turnId);
+          if (
+            Option.isSome(segmentState) &&
+            segmentState.value.activeMessageId !== null &&
+            segmentState.value.baseKey !== incomingBaseKey
+          ) {
+            yield* finalizeActiveAssistantSegmentBoundary({
+              event,
+              threadId: thread.id,
+              turnId,
+              createdAt: now,
+              commandTag: "assistant-complete-on-content-block-change",
+              finalDeltaCommandTag: "assistant-delta-finalize-on-content-block-change",
+              flushCommandTag: "assistant-delta-flush-on-content-block-change",
+            });
+          }
+        }
         const assistantMessageId = yield* getOrCreateAssistantMessageId({
           threadId: thread.id,
           event,
@@ -1368,25 +1456,7 @@ const make = Effect.gen(function* () {
           ? toTurnId(event.turnId)
           : undefined;
       if (pauseForUserTurnId) {
-        const detailedThread = yield* getLoadedThreadDetail();
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
-        const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
-            ? yield* flushBufferedAssistantMessagesForTurn({
-                event,
-                threadId: thread.id,
-                turnId: pauseForUserTurnId,
-                createdAt: now,
-                commandTag:
-                  event.type === "request.opened"
-                    ? "assistant-delta-flush-on-request-opened"
-                    : "assistant-delta-flush-on-user-input-requested",
-              })
-            : new Set<MessageId>();
-        yield* finalizeActiveAssistantSegmentForTurn({
+        yield* finalizeActiveAssistantSegmentBoundary({
           event,
           threadId: thread.id,
           turnId: pauseForUserTurnId,
@@ -1399,12 +1469,10 @@ const make = Effect.gen(function* () {
             event.type === "request.opened"
               ? "assistant-delta-finalize-on-request-opened"
               : "assistant-delta-finalize-on-user-input-requested",
-          hasProjectedMessage:
-            detailedThread !== null &&
-            hasAssistantMessageForTurn(detailedThread.messages, pauseForUserTurnId, {
-              streamingOnly: true,
-            }),
-          flushedMessageIds,
+          flushCommandTag:
+            event.type === "request.opened"
+              ? "assistant-delta-flush-on-request-opened"
+              : "assistant-delta-flush-on-user-input-requested",
         });
       }
 
