@@ -8,6 +8,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { piChildProcessSpawnOptions } from "./piSpawnOptions.ts";
 import {
   makeChildStdio,
   makePiRpcProtocol,
@@ -26,7 +27,6 @@ import {
   type PiRpcStreamEvent,
 } from "./piRpcTypes.ts";
 
-const DEFAULT_FORCE_KILL_AFTER = "2 seconds" as const;
 export interface PiRpcClientOptions {
   readonly binaryPath: string;
   readonly cwd: string;
@@ -128,12 +128,17 @@ export const makePiRpcClient = Effect.fn("makePiRpcClient")(function* (
 
   const child = yield* spawner
     .spawn(
-      ChildProcess.make(options.binaryPath, args, {
-        cwd: options.cwd,
-        env,
-        forceKillAfter: options.forceKillAfter ?? DEFAULT_FORCE_KILL_AFTER,
-        shell: process.platform === "win32",
-      }),
+      ChildProcess.make(
+        options.binaryPath,
+        args,
+        piChildProcessSpawnOptions({
+          cwd: options.cwd,
+          env,
+          ...(options.forceKillAfter !== undefined
+            ? { forceKillAfter: options.forceKillAfter }
+            : {}),
+        }),
+      ),
     )
     .pipe(
       Effect.provideService(Scope.Scope, runtimeScope),
@@ -169,11 +174,12 @@ export const makePiRpcClient = Effect.fn("makePiRpcClient")(function* (
     Effect.forkIn(runtimeScope),
   );
 
+  const forceKillAfter = options.forceKillAfter ?? "2 seconds";
   const terminateChild = child.kill({ killSignal: "SIGTERM" }).pipe(
     Effect.andThen(
       child.kill({
         killSignal: "SIGKILL",
-        forceKillAfter: options.forceKillAfter ?? DEFAULT_FORCE_KILL_AFTER,
+        forceKillAfter,
       }),
     ),
     Effect.ignore,

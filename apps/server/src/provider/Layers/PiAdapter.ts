@@ -19,7 +19,6 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   type ProviderUserInputAnswers,
-  type ProviderApprovalDecision,
   ThreadId,
   TurnId,
   type UserInputQuestion,
@@ -57,6 +56,7 @@ import {
 } from "../Errors.ts";
 import { decodePiModelSlug, encodePiModelSlug } from "../pi/piModelSlug.ts";
 import { resolvePiThinkingLevelForModel } from "../pi/piModelMapping.ts";
+import { formatPiNativeLogRecord, piRpcRawSource } from "../pi/piNativeLogging.ts";
 import {
   makePiRpcClient,
   PiRpcClientSpawnError,
@@ -117,6 +117,7 @@ interface PiSessionContext {
   readonly client: PiRpcClientShape;
   readonly commandLock: Semaphore.Semaphore;
   eventFiber: Fiber.Fiber<void, never>;
+  stderrFiber: Fiber.Fiber<void, never> | undefined;
   readonly stopped: Ref.Ref<boolean>;
   activeTurnId: TurnId | undefined;
   turnPhase: PiTurnPhase;
@@ -382,7 +383,7 @@ export function makePiAdapter(
       readonly itemId?: string | undefined;
       readonly requestId?: string | undefined;
       readonly raw?: unknown;
-      readonly rawSource?: "pi.rpc.event" | "pi.rpc.extension_ui";
+      readonly rawSource?: string;
     }): Effect.Effect<
       Pick<
         ProviderRuntimeEvent,
@@ -412,7 +413,7 @@ export function makePiAdapter(
           ...(input.raw !== undefined
             ? {
                 raw: {
-                  source: input.rawSource ?? "pi.rpc.event",
+                  source: piRpcRawSource(input.rawSource ?? "event"),
                   payload: input.raw,
                 },
               }
@@ -426,20 +427,26 @@ export function makePiAdapter(
     const writeNativeEvent = (
       threadId: ThreadId,
       event: Record<string, unknown>,
+      meta?: { readonly turnId?: TurnId; readonly category?: string },
     ): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (!nativeEventLogger) {
           return;
         }
         const observedAt = yield* nowIso;
+        const eventType = readString(event.type) ?? "event";
         yield* nativeEventLogger.write(
           {
             observedAt,
-            event: {
+            event: formatPiNativeLogRecord({
               provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
               threadId,
-              ...event,
-            },
+              ...(meta?.turnId ? { turnId: meta.turnId } : {}),
+              category: meta?.category ?? eventType,
+              type: eventType,
+              payload: event,
+            }),
           },
           threadId,
         );
@@ -480,8 +487,39 @@ export function makePiAdapter(
         };
       });
 
+    const cancelPendingExtensionUi = Effect.fn("cancelPendingExtensionUi")(function* (
+      context: PiSessionContext,
+      reason: string,
+    ) {
+      if (context.pendingExtensionUi.size === 0) {
+        return;
+      }
+      const pending = [...context.pendingExtensionUi.values()];
+      context.pendingExtensionUi.clear();
+      for (const request of pending) {
+        if (request.timeoutFiber) {
+          yield* Fiber.interrupt(request.timeoutFiber).pipe(Effect.ignore);
+        }
+        yield* context.client
+          .sendExtensionUiResponse({ id: request.piRequestId, cancelled: true })
+          .pipe(Effect.ignore);
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.session.threadId,
+            turnId: context.activeTurnId,
+            requestId: request.t3RequestId,
+            raw: { type: "extension_ui_cancelled", reason },
+            rawSource: "extension_ui",
+          })),
+          type: "user-input.resolved",
+          payload: { answers: {} },
+        });
+      }
+    });
+
     const clearTurnState = (context: PiSessionContext): Effect.Effect<void> =>
       Effect.gen(function* () {
+        yield* cancelPendingExtensionUi(context, "Pi turn state cleared.");
         context.activeTurnId = undefined;
         context.turnPhase = "idle";
         context.turnStartedEmitted = false;
@@ -494,12 +532,6 @@ export function makePiAdapter(
           yield* Fiber.interrupt(context.watchdogFiber).pipe(Effect.ignore);
           context.watchdogFiber = undefined;
         }
-        for (const pending of context.pendingExtensionUi.values()) {
-          if (pending.timeoutFiber) {
-            yield* Fiber.interrupt(pending.timeoutFiber).pipe(Effect.ignore);
-          }
-        }
-        context.pendingExtensionUi.clear();
       });
 
     const failActiveTurn = Effect.fn("failActiveTurn")(function* (
@@ -680,7 +712,10 @@ export function makePiAdapter(
         return;
       }
 
-      yield* writeNativeEvent(context.session.threadId, event).pipe(Effect.ignore);
+      yield* writeNativeEvent(context.session.threadId, event, {
+        ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+        category: eventType,
+      }).pipe(Effect.ignore);
 
       if (eventType === "extension_ui_request") {
         yield* handleExtensionUiRequest(context, event);
@@ -813,7 +848,7 @@ export function makePiAdapter(
             threadId: context.session.threadId,
             turnId: context.activeTurnId,
             raw: event,
-            rawSource: "pi.rpc.extension_ui",
+            rawSource: "extension_ui",
           })),
           type: "runtime.warning",
           payload: { message },
@@ -886,7 +921,7 @@ export function makePiAdapter(
           turnId: context.activeTurnId,
           requestId: t3RequestId,
           raw: event,
-          rawSource: "pi.rpc.extension_ui",
+          rawSource: "extension_ui",
         })),
         type: "user-input.requested",
         payload: { questions: [...questions] },
@@ -1140,6 +1175,34 @@ export function makePiAdapter(
       return stopReason ?? null;
     }
 
+    const handleUnexpectedProcessExit = Effect.fn("handleUnexpectedProcessExit")(function* (
+      context: PiSessionContext,
+      detail: string,
+    ) {
+      if (yield* Ref.get(context.stopped)) {
+        return;
+      }
+      yield* Ref.set(context.stopped, true);
+      const threadId = context.session.threadId;
+      sessions.delete(threadId);
+      if (context.activeTurnId && !context.turnCompletedEmitted) {
+        yield* failActiveTurn(context, detail);
+      } else {
+        yield* cancelPendingExtensionUi(context, detail);
+      }
+      yield* context.client.close().pipe(Effect.ignore);
+      if (context.stderrFiber) {
+        yield* Fiber.interrupt(context.stderrFiber).pipe(Effect.ignore);
+      }
+      yield* Fiber.interrupt(context.eventFiber).pipe(Effect.ignore);
+      yield* Scope.close(context.scope, Exit.void).pipe(Effect.ignore);
+      yield* emit({
+        ...(yield* buildEventBase({ threadId })),
+        type: "session.exited",
+        payload: { reason: detail, exitKind: "error", recoverable: true },
+      });
+    });
+
     const stopPiContext = Effect.fn("stopPiContext")(function* (context: PiSessionContext) {
       if (yield* Ref.getAndSet(context.stopped, true)) {
         return;
@@ -1149,6 +1212,9 @@ export function makePiAdapter(
         yield* failActiveTurn(context, "Pi session stopped.", { aborted: true });
       }
       yield* context.client.close().pipe(Effect.ignore);
+      if (context.stderrFiber) {
+        yield* Fiber.interrupt(context.stderrFiber).pipe(Effect.ignore);
+      }
       yield* Fiber.interrupt(context.eventFiber).pipe(Effect.ignore);
       yield* Scope.close(context.scope, Exit.void).pipe(Effect.ignore);
     });
@@ -1329,6 +1395,7 @@ export function makePiAdapter(
             client: spawned.client,
             commandLock,
             eventFiber: undefined as unknown as Fiber.Fiber<void, never>,
+            stderrFiber: undefined,
             stopped,
             activeTurnId: undefined,
             turnPhase: "idle",
@@ -1370,13 +1437,53 @@ export function makePiAdapter(
 
           if (supportsDirectDispatch) {
             yield* clientWithDispatch.setStreamEventHandler!(dispatchStreamEvent);
-            context.eventFiber = yield* Effect.void.pipe(Effect.forkChild);
+            context.eventFiber = yield* Effect.void.pipe(Effect.forkIn(spawned.sessionScope));
           } else {
             context.eventFiber = yield* Stream.runForEach(
               spawned.client.streamEvents,
               dispatchStreamEvent,
-            ).pipe(Effect.forkIn(spawned.sessionScope));
+            ).pipe(
+              Effect.ensuring(
+                handleUnexpectedProcessExit(context, "Pi RPC process exited unexpectedly.").pipe(
+                  Effect.ignore,
+                ),
+              ),
+              Effect.forkIn(spawned.sessionScope),
+            );
           }
+
+          context.stderrFiber = yield* spawned.client.stderrLines.pipe(
+            Stream.runForEach((line) =>
+              Effect.gen(function* () {
+                if (yield* Ref.get(context.stopped)) {
+                  return;
+                }
+                const trimmed = line.trim();
+                if (trimmed.length === 0) {
+                  return;
+                }
+                yield* writeNativeEvent(
+                  context.session.threadId,
+                  { type: "stderr", line: trimmed },
+                  {
+                    ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+                    category: "stderr",
+                  },
+                ).pipe(Effect.ignore);
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId: context.activeTurnId,
+                    raw: { type: "stderr", line: trimmed },
+                    rawSource: "stderr",
+                  })),
+                  type: "runtime.warning",
+                  payload: { message: trimmed },
+                });
+              }),
+            ),
+            Effect.forkIn(spawned.sessionScope),
+          );
 
           sessions.set(input.threadId, context);
           sessionScopeTransferred = true;
@@ -1455,14 +1562,23 @@ export function makePiAdapter(
         lastError: undefined,
       });
 
-      yield* context.commandLock.withPermits(1)(
-        Effect.gen(function* () {
-          yield* applyModelAndThinking(context, validated.model, validated.slug, modelSelection);
-          yield* context.client
-            .prompt({ message: promptMessage })
-            .pipe(Effect.mapError((error) => mapPiClientError("prompt", error)));
-        }),
-      );
+      yield* context.commandLock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            yield* applyModelAndThinking(context, validated.model, validated.slug, modelSelection);
+            yield* context.client
+              .prompt({ message: promptMessage })
+              .pipe(Effect.mapError((error) => mapPiClientError("prompt", error)));
+          }),
+        )
+        .pipe(
+          Effect.catch((error: ProviderAdapterError) =>
+            Effect.gen(function* () {
+              yield* failActiveTurn(context, providerAdapterErrorDetail(error));
+              return yield* error;
+            }),
+          ),
+        );
 
       context.turnPhase = "accepted";
       context.turns.push({ id: turnId, items: [] });

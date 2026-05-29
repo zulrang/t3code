@@ -31,11 +31,9 @@ export const parseJsonlLine = (line: string): Effect.Effect<unknown, PiJsonlPars
   Effect.gen(function* () {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
-      return yield* Effect.fail(
-        new PiJsonlParseError({
-          line,
-        }),
-      );
+      return yield* new PiJsonlParseError({
+        line,
+      });
     }
     return yield* Effect.try({
       try: () => JSON.parse(trimmed) as unknown,

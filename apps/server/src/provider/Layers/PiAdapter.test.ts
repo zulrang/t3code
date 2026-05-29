@@ -20,13 +20,16 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { assert, beforeEach, describe, expect } from "vitest";
 
 import { ServerConfig } from "../../config.ts";
 import { ProviderAdapterValidationError, type ProviderAdapterError } from "../Errors.ts";
+import { PiRpcProtocolCommandFailedError } from "../pi/piRpcProtocol.ts";
 import { encodePiModelSlug } from "../pi/piModelSlug.ts";
 import type { PiRpcClientShape, PiRpcClientError } from "../pi/piRpcClient.ts";
 import type {
@@ -70,6 +73,7 @@ const readFixtureJsonlLines = (name: string) =>
 class FakePiRpcClient implements PiRpcClientShape {
   readonly piVersion = "0.72.1-test";
   readonly streamInput: Queue.Queue<PiRpcStreamEvent, Cause.Done<void>>;
+  readonly stderrInput: Queue.Queue<string, Cause.Done<void>>;
   readonly calls = {
     setModel: [] as Array<{ provider: string; modelId: string }>,
     setThinkingLevel: [] as Array<PiThinkingLevel>,
@@ -82,22 +86,38 @@ class FakePiRpcClient implements PiRpcClientShape {
   };
 
   readonly streamEvents: Stream.Stream<PiRpcStreamEvent, never>;
-  readonly stderrLines = Stream.empty;
+  readonly stderrLines: Stream.Stream<string, never>;
   readonly spawnKey: string;
+  readonly directDispatch: boolean;
+  promptError: PiRpcClientError | undefined;
   private streamHandler: ((event: PiRpcStreamEvent) => Effect.Effect<void>) | undefined;
   private readonly isStreamingRef: Ref.Ref<boolean>;
 
-  constructor(spawnKey: string, isStreamingRef: Ref.Ref<boolean>) {
+  constructor(
+    spawnKey: string,
+    isStreamingRef: Ref.Ref<boolean>,
+    options?: { readonly directDispatch?: boolean },
+  ) {
     this.spawnKey = spawnKey;
     this.isStreamingRef = isStreamingRef;
+    this.directDispatch = options?.directDispatch !== false;
     this.streamInput = Effect.runSync(Queue.unbounded<PiRpcStreamEvent, Cause.Done<void>>());
+    this.stderrInput = Effect.runSync(Queue.unbounded<string, Cause.Done<void>>());
     this.streamEvents = Stream.fromQueue(this.streamInput);
+    this.stderrLines = Stream.fromQueue(this.stderrInput);
   }
 
   setStreamEventHandler = (handler: (event: PiRpcStreamEvent) => Effect.Effect<void>) =>
     Effect.sync(() => {
+      if (!this.directDispatch) {
+        return;
+      }
       this.streamHandler = handler;
     });
+
+  pushStderr(lines: ReadonlyArray<string>) {
+    return Effect.forEach(lines, (line) => Queue.offer(this.stderrInput, line), { discard: true });
+  }
 
   pushEvents(events: ReadonlyArray<PiRpcStreamEvent>) {
     const self = this;
@@ -166,6 +186,9 @@ class FakePiRpcClient implements PiRpcClientShape {
   prompt = (input: { readonly message: string }) => {
     const self = this;
     return Effect.gen(function* () {
+      if (self.promptError) {
+        return yield* self.promptError;
+      }
       self.calls.prompt.push(input);
       yield* Ref.set(self.isStreamingRef, true);
     });
@@ -190,31 +213,54 @@ class FakePiRpcClient implements PiRpcClientShape {
 const fakeClients: FakePiRpcClient[] = [];
 const isStreamingRef = Effect.runSync(Ref.make(false));
 
-const fakeClientFactory: PiRpcClientFactory = (_options) =>
+const fakeClientFactory: PiRpcClientFactory = (options) =>
   Effect.gen(function* () {
     yield* Scope.Scope;
-    const client = new FakePiRpcClient(`spawn-${fakeClients.length + 1}`, isStreamingRef);
+    const directDispatch = !String(options.binaryPath).includes("no-direct-dispatch");
+    const client = new FakePiRpcClient(`spawn-${fakeClients.length + 1}`, isStreamingRef, {
+      directDispatch,
+    });
     fakeClients.push(client);
     return client;
   });
 
-const PiAdapterTestLayer = Layer.effect(
-  PiAdapter,
-  makePiAdapter(
-    decodePiSettings({
-      enabled: true,
-      binaryPath: "pi",
-      customModels: [],
-    }),
-    {
-      instanceId: INSTANCE_ID,
-      makeRpcClient: fakeClientFactory,
-    },
-  ),
-).pipe(
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
-  Layer.provideMerge(NodeServices.layer),
-);
+const makePiAdapterLayer = (options?: {
+  readonly nativeEventLogger?: {
+    readonly filePath: string;
+    readonly write: (event: unknown, threadId: ThreadId | null) => Effect.Effect<void>;
+    readonly close: () => Effect.Effect<void>;
+  };
+  readonly turnSilenceHardMs?: number;
+  readonly turnSilenceReconcileMs?: number;
+  readonly sleep?: (duration: import("effect/Duration").Input) => Effect.Effect<void>;
+}) =>
+  Layer.effect(
+    PiAdapter,
+    makePiAdapter(
+      decodePiSettings({
+        enabled: true,
+        binaryPath: "pi",
+        customModels: [],
+      }),
+      {
+        instanceId: INSTANCE_ID,
+        makeRpcClient: fakeClientFactory,
+        ...(options?.nativeEventLogger ? { nativeEventLogger: options.nativeEventLogger } : {}),
+        ...(options?.turnSilenceHardMs !== undefined
+          ? { turnSilenceHardMs: options.turnSilenceHardMs }
+          : {}),
+        ...(options?.turnSilenceReconcileMs !== undefined
+          ? { turnSilenceReconcileMs: options.turnSilenceReconcileMs }
+          : {}),
+        ...(options?.sleep ? { sleep: options.sleep } : {}),
+      },
+    ),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+const PiAdapterTestLayer = makePiAdapterLayer();
 
 const collectThreadEvents = (
   stream: Stream.Stream<ProviderRuntimeEvent, never>,
@@ -574,6 +620,280 @@ describe("PiAdapter", () => {
 
         const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
         expect(error).toBeInstanceOf(ProviderAdapterValidationError);
+      }),
+    );
+
+    it.effect("writes redacted native RPC logs with pi.rpc.* sources", () =>
+      Effect.gen(function* () {
+        const nativeEvents: Array<{ event?: { source?: string; threadId?: string } }> = [];
+        const adapterLayer = makePiAdapterLayer({
+          nativeEventLogger: {
+            filePath: "memory://pi-native-events",
+            write: (event) => {
+              nativeEvents.push(event as (typeof nativeEvents)[number]);
+              return Effect.void;
+            },
+            close: () => Effect.void,
+          },
+        });
+
+        const threadId = asThreadId("thread-native-log");
+        yield* Effect.gen(function* () {
+          const adapter = yield* PiAdapter;
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "hello",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          });
+          yield* fakeClients[0]!.pushEvents([{ type: "turn_start" }]);
+          yield* yieldToEventLoop;
+        }).pipe(Effect.provide(adapterLayer));
+
+        expect(nativeEvents.length).toBeGreaterThan(0);
+        expect(nativeEvents.some((record) => record.event?.source === "pi.rpc.turn_start")).toBe(
+          true,
+        );
+        expect(nativeEvents.some((record) => record.event?.threadId === "thread-native-log")).toBe(
+          true,
+        );
+      }),
+    );
+
+    it.effect("maps Pi stderr lines to runtime.warning", () =>
+      Effect.gen(function* () {
+        const adapter = yield* PiAdapter;
+        const threadId = asThreadId("thread-stderr");
+        const eventsFiber = yield* collectThreadEventsUntil(
+          adapter.streamEvents,
+          threadId,
+          (event) =>
+            (event as { type: string }).type === "runtime.warning" &&
+            (event as { payload?: { message?: string } }).payload?.message === "pi auth warning",
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+        });
+        yield* fakeClients[0]!.pushStderr(["pi auth warning"]);
+        yield* yieldToEventLoop;
+
+        const events = yield* joinCollectedEvents(eventsFiber);
+        expect(
+          events.some(
+            (event) =>
+              (event as { type: string; payload?: { message?: string } }).type ===
+                "runtime.warning" &&
+              (event as { payload?: { message?: string } }).payload?.message === "pi auth warning",
+          ),
+        ).toBe(true);
+      }),
+    );
+
+    it.effect("fails the turn when prompt is rejected after acceptance", () =>
+      Effect.gen(function* () {
+        const adapter = yield* PiAdapter;
+        const threadId = asThreadId("thread-prompt-fail");
+        const eventsFiber = yield* collectThreadEventsUntil(
+          adapter.streamEvents,
+          threadId,
+          (event) =>
+            (event as { type: string; payload?: { state?: string } }).type === "turn.completed" &&
+            (event as { payload?: { state?: string } }).payload?.state === "failed",
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+
+        fakeClients[0]!.promptError = new PiRpcProtocolCommandFailedError({
+          command: "prompt",
+          error: "upstream provider auth failed",
+        });
+
+        const result = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "hello",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          })
+          .pipe(Effect.result);
+        expect(Result.isFailure(result)).toBe(true);
+
+        const events = yield* joinCollectedEvents(eventsFiber);
+        const failed = events.filter(
+          (event) =>
+            (event as { type: string; payload?: { state?: string } }).type === "turn.completed" &&
+            (event as { payload?: { state?: string } }).payload?.state === "failed",
+        );
+        expect(failed).toHaveLength(1);
+      }),
+    );
+
+    it.effect("fails stalled turns via watchdog timeout", () =>
+      Effect.gen(function* () {
+        const adapterLayer = makePiAdapterLayer({
+          turnSilenceHardMs: 1_000,
+          turnSilenceReconcileMs: 100,
+        });
+        const threadId = asThreadId("thread-watchdog");
+
+        yield* Effect.gen(function* () {
+          const adapter = yield* PiAdapter;
+          const eventsFiber = yield* collectThreadEventsUntil(
+            adapter.streamEvents,
+            threadId,
+            (event) =>
+              (event as { type: string; payload?: { state?: string } }).type === "turn.completed" &&
+              (event as { payload?: { state?: string } }).payload?.state === "failed",
+          );
+
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "stall",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          });
+          yield* fakeClients[0]!.pushEvents([{ type: "turn_start" }]);
+          yield* TestClock.adjust("2 seconds");
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+
+          const events = yield* joinCollectedEvents(eventsFiber);
+          const failed = events.filter(
+            (event) =>
+              (event as { type: string; payload?: { state?: string } }).type === "turn.completed" &&
+              (event as { payload?: { state?: string } }).payload?.state === "failed",
+          );
+          expect(failed).toHaveLength(1);
+        }).pipe(Effect.provide(Layer.mergeAll(adapterLayer, TestClock.layer())));
+      }),
+    );
+
+    it.effect("cancels stale extension UI when restarting a session", () =>
+      Effect.gen(function* () {
+        const adapter = yield* PiAdapter;
+        const threadId = asThreadId("thread-ui-restart");
+
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "trigger ui",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+        yield* fakeClients[0]!.pushEvents([
+          {
+            type: "extension_ui_request",
+            id: "uuid-stale",
+            method: "confirm",
+            title: "Continue?",
+            message: "Allow?",
+          },
+        ]);
+        yield* yieldToEventLoop;
+
+        const firstClient = fakeClients[0]!;
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+
+        expect(firstClient.calls.close).toBe(1);
+        expect(firstClient.calls.extensionUiResponses).toEqual([
+          { id: "uuid-stale", cancelled: true },
+        ]);
+        expect(fakeClients).toHaveLength(2);
+      }),
+    );
+
+    it.effect("emits only one turn.started per T3 turn", () =>
+      Effect.gen(function* () {
+        const adapter = yield* PiAdapter;
+        const threadId = asThreadId("thread-single-start");
+        const eventsFiber = yield* collectThreadEventsUntil(
+          adapter.streamEvents,
+          threadId,
+          (event) => (event as { type: string }).type === "turn.completed",
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "hello",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+        yield* fakeClients[0]!.pushEvents([
+          { type: "turn_start" },
+          { type: "turn_start" },
+          { type: "agent_start" },
+          { type: "agent_start" },
+          {
+            type: "message_update",
+            assistantMessageEvent: { type: "text_delta", delta: "ok", contentIndex: 0 },
+          },
+          { type: "agent_end", message: { stopReason: "stop" } },
+        ]);
+        yield* Ref.set(isStreamingRef, false);
+        yield* yieldToEventLoop;
+
+        const events = yield* joinCollectedEvents(eventsFiber);
+        const started = events.filter(
+          (event) => (event as { type: string }).type === "turn.started",
+        );
+        const completed = events.filter(
+          (event) => (event as { type: string }).type === "turn.completed",
+        );
+        expect(started).toHaveLength(1);
+        expect(completed).toHaveLength(1);
+      }),
+    );
+
+    it.effect("closes RPC clients when stopSession is called after failed prompt", () =>
+      Effect.gen(function* () {
+        const adapter = yield* PiAdapter;
+        const threadId = asThreadId("thread-failed-prompt-cleanup");
+
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+        });
+
+        fakeClients[0]!.promptError = new PiRpcProtocolCommandFailedError({
+          command: "prompt",
+          error: "broken pipe",
+        });
+        yield* adapter
+          .sendTurn({
+            threadId,
+            input: "hello",
+            modelSelection: createModelSelection(INSTANCE_ID, MODEL_SLUG),
+          })
+          .pipe(Effect.result);
+
+        yield* adapter.stopSession(threadId);
+        expect(fakeClients[0]?.calls.close).toBe(1);
+        expect(yield* adapter.hasSession(threadId)).toBe(false);
       }),
     );
   });

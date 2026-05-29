@@ -21,6 +21,7 @@ import {
   PiRpcClientSpawnError,
   type PiRpcClientShape,
 } from "../pi/piRpcClient.ts";
+import { piChildProcessSpawnOptions } from "../pi/piSpawnOptions.ts";
 import { mapPiRpcModelsToServerModels } from "../pi/piModelMapping.ts";
 import type { PiRpcAvailableModels } from "../pi/piRpcTypes.ts";
 import {
@@ -58,6 +59,9 @@ export const PI_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 export const PI_SNAPSHOT_REFRESH_JITTER_MS = 30_000;
 export const PI_PROBE_REQUEST_TIMEOUT_MS = 8_000;
 export const PI_PROBE_RPC_CONCURRENCY = 2;
+
+/** v1 does not cap total Pi RPC processes across all enabled instances globally. */
+export const PI_V1_NO_GLOBAL_PROCESS_SEMAPHORE = true as const;
 
 const DEFAULT_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -162,10 +166,14 @@ const runPiBinaryVersionCheck = Effect.fn("runPiBinaryVersionCheck")(function* (
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const command = ChildProcess.make(piSettings.binaryPath, ["--version"], {
-    env: environment,
-    shell: process.platform === "win32",
-  });
+  const command = ChildProcess.make(
+    piSettings.binaryPath,
+    ["--version"],
+    piChildProcessSpawnOptions({
+      cwd: process.cwd(),
+      env: environment,
+    }),
+  );
   return yield* spawnAndCollect(piSettings.binaryPath, command);
 });
 
