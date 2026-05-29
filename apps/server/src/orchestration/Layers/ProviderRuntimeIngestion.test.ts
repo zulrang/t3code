@@ -2039,7 +2039,7 @@ describe("ProviderRuntimeIngestion", () => {
     await waitForThread(harness.readModel, (entry) =>
       entry.messages.some(
         (message: ProviderRuntimeTestMessage) =>
-          message.id === "assistant:text:0" &&
+          message.id === "assistant:turn-tool-segment:text:0" &&
           !message.streaming &&
           message.text === "before tools",
       ),
@@ -2073,14 +2073,16 @@ describe("ProviderRuntimeIngestion", () => {
     const thread = await waitForThread(harness.readModel, (entry) =>
       entry.messages.some(
         (message: ProviderRuntimeTestMessage) =>
-          message.id === "assistant:text:4" && !message.streaming && message.text === "after tools",
+          message.id === "assistant:turn-tool-segment:text:4" &&
+          !message.streaming &&
+          message.text === "after tools",
       ),
     );
     const beforeTools = thread.messages.find(
-      (message: ProviderRuntimeTestMessage) => message.id === "assistant:text:0",
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:turn-tool-segment:text:0",
     );
     const afterTools = thread.messages.find(
-      (message: ProviderRuntimeTestMessage) => message.id === "assistant:text:4",
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:turn-tool-segment:text:4",
     );
     expect(beforeTools?.text).toBe("before tools");
     expect(afterTools?.text).toBe("after tools");
@@ -2090,6 +2092,103 @@ describe("ProviderRuntimeIngestion", () => {
         (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.started",
       ),
     ).toBe(true);
+  });
+
+  it("scopes assistant segment message ids by turn so Pi content indices do not collide", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const firstStartedAt = "2026-03-28T09:00:00.000Z";
+    const firstCompletedAt = "2026-03-28T09:00:01.000Z";
+    const secondStartedAt = "2026-03-28T09:00:02.000Z";
+    const secondCompletedAt = "2026-03-28T09:00:03.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pi-text-index-1"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: firstStartedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-1"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === "turn-pi-text-index-1",
+    );
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-pi-text-index-1"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: firstStartedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-1"),
+      itemId: asItemId("text:0"),
+      payload: { streamKind: "assistant_text", delta: "first turn" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-pi-text-index-1"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: firstCompletedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-1"),
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:turn-pi-text-index-1:text:0" && message.text === "first turn",
+      ),
+    );
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pi-text-index-2"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: secondStartedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-2"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === "turn-pi-text-index-2",
+    );
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-pi-text-index-2"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: secondStartedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-2"),
+      itemId: asItemId("text:0"),
+      payload: { streamKind: "assistant_text", delta: "second turn" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-pi-text-index-2"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: secondCompletedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-text-index-2"),
+      payload: { state: "completed" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:turn-pi-text-index-2:text:0" && message.text === "second turn",
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:turn-pi-text-index-1:text:0",
+      )?.text,
+    ).toBe("first turn");
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:turn-pi-text-index-2:text:0",
+      )?.text,
+    ).toBe("second turn");
   });
 
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {

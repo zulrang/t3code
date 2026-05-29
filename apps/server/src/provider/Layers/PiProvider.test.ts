@@ -80,7 +80,7 @@ describe("PiProvider", () => {
           process.env,
           () => {
             probeCalls += 1;
-            return Effect.succeed({ models: [] });
+            return Effect.succeed({ models: { models: [] }, slashCommands: [] });
           },
         );
 
@@ -152,7 +152,7 @@ describe("PiProvider", () => {
           makePiSettings(),
           process.cwd(),
           process.env,
-          () => Effect.succeed(discoveryFixture.data),
+          () => Effect.succeed({ models: discoveryFixture.data, slashCommands: [] }),
           binaryVersionOk,
         );
 
@@ -177,13 +177,37 @@ describe("PiProvider", () => {
           makePiSettings(),
           process.cwd(),
           process.env,
-          () => Effect.succeed({ models: [] }),
+          () => Effect.succeed({ models: { models: [] }, slashCommands: [] }),
           binaryVersionOk,
         );
 
         assert.equal(snapshot.status, "warning");
         assert.deepEqual(snapshot.models, []);
         assert.match(snapshot.message ?? "", /no available models/i);
+      }),
+    );
+
+    it.effect("maps Pi RPC commands into slashCommands on the provider snapshot", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* checkPiProviderStatus(
+          makePiSettings(),
+          process.cwd(),
+          process.env,
+          () =>
+            Effect.succeed({
+              models: discoveryFixture.data,
+              slashCommands: [
+                { name: "reload", description: "Reload extensions" },
+                { name: "rpc-input" },
+              ],
+            }),
+          binaryVersionOk,
+        );
+
+        assert.deepEqual(snapshot.slashCommands, [
+          { name: "reload", description: "Reload extensions" },
+          { name: "rpc-input" },
+        ]);
       }),
     );
 
@@ -198,12 +222,47 @@ describe("PiProvider", () => {
           customEnv,
           (input) => {
             capturedEnvironment = input.environment;
-            return Effect.succeed(discoveryFixture.data);
+            return Effect.succeed({ models: discoveryFixture.data, slashCommands: [] });
           },
           binaryVersionOk,
         );
 
         assert.deepEqual(capturedEnvironment, customEnv);
+      }),
+    );
+
+    it.effect("fetches slash commands during RPC discovery", () =>
+      Effect.gen(function* () {
+        let getCommandsCalls = 0;
+        const discovery = yield* probePiRpcDiscovery({
+          binaryPath: "pi",
+          cwd: process.cwd(),
+          makeClient: () =>
+            Effect.succeed({
+              getState: () => Effect.succeed({}),
+              getAvailableModels: () => Effect.succeed(discoveryFixture.data),
+              getCommands: () => {
+                getCommandsCalls += 1;
+                return Effect.succeed({
+                  commands: [{ name: "reload", description: "Reload extensions" }],
+                });
+              },
+              setModel: () => Effect.die("not used"),
+              setThinkingLevel: () => Effect.void,
+              prompt: () => Effect.void,
+              abort: () => Effect.void,
+              sendExtensionUiResponse: () => Effect.void,
+              close: () => Effect.void,
+              piVersion: undefined,
+              streamEvents: Stream.empty,
+              stderrLines: Stream.empty,
+            }),
+        });
+
+        assert.equal(getCommandsCalls, 1);
+        assert.deepEqual(discovery.slashCommands, [
+          { name: "reload", description: "Reload extensions" },
+        ]);
       }),
     );
 
@@ -251,7 +310,7 @@ describe("PiProvider", () => {
             yield* Ref.update(maxActive, (current) => Math.max(current, next));
             yield* Deferred.await(gate);
             yield* Ref.update(active, (count) => count - 1);
-            return discoveryFixture.data;
+            return { models: discoveryFixture.data, slashCommands: [] };
           });
 
         const fiber = yield* Effect.forkScoped(

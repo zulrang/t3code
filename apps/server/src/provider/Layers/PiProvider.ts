@@ -3,6 +3,7 @@ import {
   type PiSettings,
   type ModelCapabilities,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -22,6 +23,7 @@ import {
   type PiRpcClientShape,
 } from "../pi/piRpcClient.ts";
 import { piChildProcessSpawnOptions } from "../pi/piSpawnOptions.ts";
+import { mapPiRpcCommandsToSlashCommands } from "../pi/piCommandMapping.ts";
 import { mapPiRpcModelsToServerModels } from "../pi/piModelMapping.ts";
 import type { PiRpcAvailableModels } from "../pi/piRpcTypes.ts";
 import {
@@ -73,6 +75,11 @@ const ZERO_MODELS_MESSAGE =
 export interface PiRpcProbeResult {
   readonly version: string | null;
   readonly models: ReadonlyArray<ServerProviderModel>;
+}
+
+export interface PiRpcDiscovery {
+  readonly models: PiRpcAvailableModels;
+  readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 }
 
 function hashString(input: string): number {
@@ -218,8 +225,15 @@ export const probePiRpcDiscovery = Effect.fn("probePiRpcDiscovery")(function* (i
             }),
         ),
       );
+      const slashCommands = yield* client.getCommands().pipe(
+        Effect.map((commands) => mapPiRpcCommandsToSlashCommands(commands.commands)),
+        Effect.orElseSucceed(() => [] as ReadonlyArray<ServerProviderSlashCommand>),
+      );
       yield* client.close();
-      return discovery;
+      return {
+        models: discovery,
+        slashCommands,
+      } satisfies PiRpcDiscovery;
     }),
   );
 });
@@ -288,9 +302,9 @@ function mapDiscoveryToSnapshot(input: {
   readonly piSettings: PiSettings;
   readonly checkedAt: string;
   readonly version: string | null;
-  readonly discovery: PiRpcAvailableModels;
+  readonly discovery: PiRpcDiscovery;
 }): ServerProviderDraft {
-  const discoveredModels = mapPiRpcModelsToServerModels(input.discovery.models);
+  const discoveredModels = mapPiRpcModelsToServerModels(input.discovery.models.models);
   const models = providerModelsFromSettings(
     discoveredModels,
     PROVIDER,
@@ -304,6 +318,7 @@ function mapDiscoveryToSnapshot(input: {
       enabled: input.piSettings.enabled,
       checkedAt: input.checkedAt,
       models,
+      slashCommands: input.discovery.slashCommands,
       probe: {
         installed: true,
         version: input.version,
@@ -319,6 +334,7 @@ function mapDiscoveryToSnapshot(input: {
     enabled: input.piSettings.enabled,
     checkedAt: input.checkedAt,
     models,
+    slashCommands: input.discovery.slashCommands,
     probe: {
       installed: true,
       version: input.version,
@@ -345,7 +361,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
     >;
   }) => Effect.Effect<
-    PiRpcAvailableModels,
+    PiRpcDiscovery,
     PiProbeError | PiRpcClientSpawnError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   > = defaultProbePiRpc,

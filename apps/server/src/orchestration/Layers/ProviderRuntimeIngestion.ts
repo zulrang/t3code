@@ -195,7 +195,11 @@ function proposedPlanIdFromEvent(event: ProviderRuntimeEvent, threadId: ThreadId
 }
 
 function assistantSegmentBaseKeyFromEvent(event: ProviderRuntimeEvent): string {
-  return String(event.itemId ?? event.turnId ?? event.eventId);
+  const itemKey = String(event.itemId ?? event.turnId ?? event.eventId);
+  const turnId = toTurnId(event.turnId);
+  const needsTurnScope =
+    turnId !== undefined && (itemKey.startsWith("text:") || itemKey.startsWith("thinking:"));
+  return needsTurnScope ? `${turnId}:${itemKey}` : itemKey;
 }
 
 function assistantSegmentMessageId(baseKey: string, segmentIndex: number): MessageId {
@@ -1484,9 +1488,7 @@ const make = Effect.gen(function* () {
       const assistantCompletion =
         event.type === "item.completed" && event.payload.itemType === "assistant_message"
           ? {
-              messageId: MessageId.make(
-                `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
-              ),
+              messageId: MessageId.make(`assistant:${assistantSegmentBaseKeyFromEvent(event)}`),
               fallbackText: event.payload.detail,
             }
           : undefined;
